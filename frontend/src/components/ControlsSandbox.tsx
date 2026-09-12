@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { RunRequest } from "@/types/telemetry";
 
 interface ControlsSandboxProps {
@@ -12,6 +12,10 @@ interface ControlsSandboxProps {
 
 export default function ControlsSandbox({ prompts, isRunning, onStart, onStop }: ControlsSandboxProps) {
   const [prompt, setPrompt] = useState(prompts[0] ?? "");
+
+  useEffect(() => {
+    if (!prompt && prompts.length > 0) setPrompt(prompts[0]);
+  }, [prompts, prompt]);
   const [customPrompt, setCustomPrompt] = useState("");
   const [useCustom, setUseCustom] = useState(false);
   const [kLookahead, setKLookahead] = useState(4);
