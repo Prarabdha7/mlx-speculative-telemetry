@@ -1,9 +1,11 @@
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.db.models import BenchmarkRun, init_db, list_benchmark_runs
 from app.engine.mlx_speculative import SpeculativeEngine
 from app.engine.runs import QUEUE_DONE, RunRegistry
 from app.schemas.metrics import ModelPair, RunRequest, TokenTelemetry
@@ -21,7 +23,13 @@ PRESET_PROMPTS = [
     "Describe Apple Silicon's unified memory architecture in one paragraph.",
 ]
 
-app = FastAPI(title="mlx-speculative-telemetry", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="mlx-speculative-telemetry", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +51,11 @@ def list_models() -> ModelPair:
 @app.get("/api/prompts")
 def list_prompts() -> list[str]:
     return PRESET_PROMPTS
+
+
+@app.get("/api/benchmarks")
+def list_benchmarks() -> list[BenchmarkRun]:
+    return list_benchmark_runs()
 
 
 @app.post("/api/runs")
