@@ -54,8 +54,10 @@ class RunRegistry:
                 temperature=request.temperature,
                 run_id=run_id,
             ):
-                await handle.queue.put(event)
                 if isinstance(event, RunMetrics) and event.is_final:
+                    # Persisted before the event reaches the WebSocket client so a
+                    # client that reacts to `is_final` by immediately refetching
+                    # /api/benchmarks is guaranteed to see this run's row.
                     benchmark = BenchmarkRun(
                         id=run_id,
                         timestamp=time.time(),
@@ -71,6 +73,7 @@ class RunRegistry:
                         elapsed_s=event.elapsed_s,
                     )
                     await loop.run_in_executor(None, insert_benchmark_run, benchmark)
+                await handle.queue.put(event)
         except asyncio.CancelledError:
             pass
         finally:
