@@ -2,7 +2,7 @@
 
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
 import type { BenchmarkRun } from "@/types/telemetry";
-import { downloadCsv, formatPercent, formatTimestamp, formatTps, toCsv } from "@/lib/utils";
+import { downloadCsv, formatDuration, formatPercent, formatTimestamp, formatTps, toCsv } from "@/lib/utils";
 
 const columns: ColumnDef<BenchmarkRun>[] = [
   { header: "Timestamp", accessorKey: "timestamp", cell: (c) => formatTimestamp(c.getValue<number>()) },
@@ -18,6 +18,7 @@ const columns: ColumnDef<BenchmarkRun>[] = [
     accessorKey: "effective_tokens_per_second",
     cell: (c) => formatTps(c.getValue<number>()),
   },
+  { header: "Wall Clock", accessorKey: "elapsed_s", cell: (c) => formatDuration(c.getValue<number>()) },
 ];
 
 export default function BenchmarkTable({ runs }: { runs: BenchmarkRun[] }) {

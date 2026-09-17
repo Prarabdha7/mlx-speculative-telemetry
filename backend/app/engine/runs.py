@@ -1,7 +1,9 @@
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 
+from app.db.models import BenchmarkRun, insert_benchmark_run
 from app.engine.mlx_speculative import SpeculativeEngine
 from app.schemas.metrics import RunMetrics, RunRequest, TokenTelemetry
 
@@ -43,6 +45,7 @@ class RunRegistry:
         return self._runs.get(run_id)
 
     async def _drive(self, handle: RunHandle, request: RunRequest, run_id: str) -> None:
+        loop = asyncio.get_running_loop()
         try:
             async for event in self._engine.generate_stream(
                 prompt=request.prompt,
@@ -51,6 +54,25 @@ class RunRegistry:
                 temperature=request.temperature,
                 run_id=run_id,
             ):
+                if isinstance(event, RunMetrics) and event.is_final:
+                    # Persisted before the event reaches the WebSocket client so a
+                    # client that reacts to `is_final` by immediately refetching
+                    # /api/benchmarks is guaranteed to see this run's row.
+                    benchmark = BenchmarkRun(
+                        id=run_id,
+                        timestamp=time.time(),
+                        draft_model=self._engine.draft_model_path,
+                        target_model=self._engine.target_model_path,
+                        k_lookahead=request.k_lookahead,
+                        temperature=request.temperature,
+                        prompt=request.prompt,
+                        total_tokens=event.total_tokens,
+                        acceptance_rate=event.acceptance_rate,
+                        speedup_ratio=event.speedup_ratio,
+                        effective_tokens_per_second=event.effective_tokens_per_second,
+                        elapsed_s=event.elapsed_s,
+                    )
+                    await loop.run_in_executor(None, insert_benchmark_run, benchmark)
                 await handle.queue.put(event)
         except asyncio.CancelledError:
             pass

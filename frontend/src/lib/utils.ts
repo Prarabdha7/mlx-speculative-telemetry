@@ -23,6 +23,10 @@ export function formatTimestamp(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toLocaleString();
 }
 
+export function formatDuration(seconds: number): string {
+  return `${seconds.toFixed(2)}s`;
+}
+
 export function toCsv<T extends object>(rows: T[]): string {
   if (rows.length === 0) return "";
   const headers = Object.keys(rows[0]) as (keyof T)[];

@@ -53,4 +53,5 @@ export interface BenchmarkRun {
   acceptance_rate: number;
   speedup_ratio: number;
   effective_tokens_per_second: number;
+  elapsed_s: number;
 }

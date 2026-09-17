@@ -18,8 +18,14 @@ export default function Home() {
   const [metrics, setMetrics] = useState<RunMetrics | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarkRun[]>([]);
-  const pendingRequest = useRef<RunRequest | null>(null);
   const client = useRef<TelemetryClient | null>(null);
+
+  const refreshBenchmarks = useCallback(() => {
+    fetch(`${API_BASE}/api/benchmarks`)
+      .then((r) => r.json())
+      .then(setBenchmarks)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch(`${API_BASE}/api/models`)
@@ -30,7 +36,8 @@ export default function Home() {
       .then((r) => r.json())
       .then(setPrompts)
       .catch(() => setPrompts([]));
-  }, []);
+    refreshBenchmarks();
+  }, [refreshBenchmarks]);
 
   useEffect(() => {
     return () => client.current?.close();
@@ -39,7 +46,6 @@ export default function Home() {
   const handleStart = useCallback(async (request: RunRequest) => {
     setTokens([]);
     setMetrics(null);
-    pendingRequest.current = request;
 
     const res = await fetch(`${API_BASE}/api/runs`, {
       method: "POST",
@@ -57,31 +63,13 @@ export default function Home() {
         setMetrics(m);
         if (m.is_final) {
           setRunId(null);
-          const req = pendingRequest.current;
-          if (req && models) {
-            setBenchmarks((prev) => [
-              {
-                id: m.run_id,
-                timestamp: Date.now() / 1000,
-                draft_model: models.draft_model,
-                target_model: models.target_model,
-                k_lookahead: req.k_lookahead,
-                temperature: req.temperature,
-                prompt: req.prompt,
-                total_tokens: m.total_tokens,
-                acceptance_rate: m.acceptance_rate,
-                speedup_ratio: m.speedup_ratio,
-                effective_tokens_per_second: m.effective_tokens_per_second,
-              },
-              ...prev,
-            ]);
-          }
+          refreshBenchmarks();
         }
       },
       onClose: () => setRunId(null),
     });
     client.current.connect(run_id);
-  }, [models]);
+  }, [refreshBenchmarks]);
 
   const handleStop = useCallback(async () => {
     if (!runId) return;
