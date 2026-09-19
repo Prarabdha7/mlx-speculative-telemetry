@@ -158,7 +158,7 @@ export default function ControlsSandbox({ isRunning, onStart, onStop }: Controls
 
   const effectiveK = manualOverride ? kLookahead : autoParams?.lookahead_k ?? 3;
   const effectiveTemperature = manualOverride ? temperature : autoParams?.temperature ?? 0.7;
-  const effectiveMaxTokens = manualOverride ? maxTokens : autoParams?.max_tokens ?? 256;
+  const effectiveMaxTokens = manualOverride ? maxTokens : autoParams?.max_tokens ?? 512;
 
   return (
     <div className="border border-border rounded-md bg-surface p-4 flex flex-col gap-5">
