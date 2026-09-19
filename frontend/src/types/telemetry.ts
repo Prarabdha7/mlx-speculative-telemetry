@@ -41,6 +41,13 @@ export interface ModelPair {
   target_model: string;
 }
 
+export interface AutoTuneParams {
+  temperature: number;
+  lookahead_k: number;
+  max_tokens: number;
+  detected_intent: string;
+}
+
 export type TelemetryEvent =
   | { type: "token"; data: TokenTelemetry }
   | { type: "metrics"; data: RunMetrics };

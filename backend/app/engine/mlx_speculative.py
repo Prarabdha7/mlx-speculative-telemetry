@@ -39,33 +39,87 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful, accurate, and concise AI assistant."
 # widens coverage defensively rather than trusting a single config field.
 NAMED_STOP_TOKENS = ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "</s>"]
 
-# Auto-tuning parameter engine: a lightweight, keyword-based intent
-# classifier that picks a sensible (temperature, k_lookahead) pair per
-# prompt category instead of relying on the client's slider defaults.
+# Autonomous parameter engine: a feature-scoring heuristic (not a fixed
+# keyword-to-bucket lookup) that derives continuous generation parameters
+# from a prompt's estimated determinism vs. creativity, rather than sorting
+# every prompt into one of three hardcoded parameter tuples.
 MAX_ALLOWED_TEMPERATURE = 1.0
-_CODE_MATH_PATTERNS = [
-    re.compile(r"def\s"),
-    re.compile(r"```"),
-    *(re.compile(rf"\b{kw}\b") for kw in ["function", "import", "class", "calculate", "solve", "code", "sql"]),
-]
-_FACTUAL_PATTERNS = [
-    re.compile(rf"\b{kw}\b") for kw in ["what is", "who is", "explain", "summarize", "history", "definition"]
-]
+_TEMPERATURE_FLOOR = 0.1  # non-code deterministic prompts asymptote here, never all the way to 0.0
+_TEMPERATURE_CEILING = 0.8
+
+# Deliberately excludes bare "(" / ")" from the syntax class: parenthetical
+# asides are common in ordinary prose ("(briefly)") and would otherwise
+# false-trigger code mode; "{" / "}" / ";" / "+" are rare enough outside
+# code and math to be reliable signals on their own.
+_CODE_SYNTAX_PATTERN = re.compile(r"def\s|```|[{};]|\+|\bimport\b|\bclass\b|\bfunction\b|\bsql\b")
+_DETERMINISM_WORDS = re.compile(r"\ball\b|\bdetails?\b|\blist\b|\bexact\b|\bprecise\b|\bcalculate\b|\bsolve\b")
+_FACTUAL_WORDS = re.compile(r"\bwhat is\b|\bwho is\b|\bwhen\b|\bhistory\b|\bdefinition\b|\bexplain\b|\bsummarize\b")
+_CREATIVITY_WORDS = re.compile(
+    r"\bwrite\b|\bstory\b|\bimagine\b|\bcreative\b|\bpoem\b|\bfiction\b|\bbrainstorm\b|\binvent\b|\bdream\b|\bdesign\b"
+)
+_STRONG_LENGTH_SIGNALS = re.compile(r"\blist all\b|\ball the\b|\bcomprehensive\b|\bin depth\b|\bevery\b")
+_MODERATE_LENGTH_SIGNALS = re.compile(r"\bexplain\b|\bdetails?\b|\bsummarize\b|\bdescribe\b|\bhistory of\b")
 
 
-def classify_prompt_intent(prompt: str) -> tuple[float, int]:
-    """Classifies a prompt into a (temperature, k_lookahead) pair by intent.
+def calculate_dynamic_parameters(prompt: str) -> dict:
+    """Scores a prompt's determinism vs. creativity and its expected output
+    length, deriving continuous generation parameters rather than sorting
+    it into one of a few fixed buckets.
 
-    Word-boundary matching avoids the obvious false positives a plain
-    substring check would hit here (e.g. "import" inside "important",
-    "class" inside "classic" or "classify").
+    Determinism signals: code/math syntax, digit density, and exhaustive or
+    precision-demanding language ("all", "details", "exact"). Creativity
+    signals: open-ended, generative language ("write", "imagine", "story").
+    Pure code prompts are special-cased to temperature 0.0 (fully greedy) —
+    every other prompt's temperature asymptotes toward, but never reaches,
+    _TEMPERATURE_FLOOR as determinism dominates, and toward _TEMPERATURE_CEILING
+    as creativity dominates, on a continuous scale between the two.
     """
     lowered = prompt.lower()
-    if any(pattern.search(lowered) for pattern in _CODE_MATH_PATTERNS):
-        return 0.0, 5
-    if any(pattern.search(lowered) for pattern in _FACTUAL_PATTERNS):
-        return 0.2, 4
-    return 0.7, 3
+
+    is_code = bool(_CODE_SYNTAX_PATTERN.search(lowered))
+    numeral_hits = len(re.findall(r"\d", lowered))
+    determinism_word_hits = len(_DETERMINISM_WORDS.findall(lowered))
+    factual_word_hits = len(_FACTUAL_WORDS.findall(lowered))
+    creativity_word_hits = len(_CREATIVITY_WORDS.findall(lowered))
+
+    determinism_score = numeral_hits + determinism_word_hits * 2 + factual_word_hits * 2
+    creativity_score = creativity_word_hits * 3
+
+    strong_length = bool(_STRONG_LENGTH_SIGNALS.search(lowered))
+    moderate_length = bool(_MODERATE_LENGTH_SIGNALS.search(lowered))
+    max_tokens = 2048 if strong_length else 1024 if moderate_length else 256
+
+    if is_code:
+        return {
+            "temperature": 0.0,
+            "lookahead_k": 5,
+            "max_tokens": max_tokens,
+            "detected_intent": "Deterministic Code / Math Generation",
+        }
+
+    total_signal = determinism_score + creativity_score
+    # net in [-1, 1]: -1 = purely deterministic, +1 = purely creative, 0 = no signal either way.
+    net = 0.0 if total_signal == 0 else (creativity_score - determinism_score) / total_signal
+    temperature = round(max(_TEMPERATURE_FLOOR, min(_TEMPERATURE_CEILING, 0.45 + net * 0.35)), 2)
+
+    if determinism_score >= creativity_score:
+        lookahead_k = 4
+        if strong_length:
+            detected_intent = "Strict Factual / Historical Listing"
+        elif factual_word_hits > 0:
+            detected_intent = "Explanatory Factual Response"
+        else:
+            detected_intent = "Deterministic / Analytical Query"
+    else:
+        lookahead_k = 3
+        detected_intent = "Open-Ended Creative Generation" if net > 0.6 else "General Conversational Response"
+
+    return {
+        "temperature": temperature,
+        "lookahead_k": lookahead_k,
+        "max_tokens": max_tokens,
+        "detected_intent": detected_intent,
+    }
 
 _SENTINEL = object()
 
@@ -191,7 +245,10 @@ class SpeculativeEngine:
         # generation even if a client bypasses the frontend slider's own cap.
         temperature = max(0.0, min(temperature, MAX_ALLOWED_TEMPERATURE))
         if auto_tune:
-            temperature, k_lookahead = classify_prompt_intent(prompt)
+            params = calculate_dynamic_parameters(prompt)
+            temperature = params["temperature"]
+            k_lookahead = params["lookahead_k"]
+            max_tokens = params["max_tokens"]
 
         is_greedy = temperature <= GREEDY_TEMPERATURE_THRESHOLD
 
