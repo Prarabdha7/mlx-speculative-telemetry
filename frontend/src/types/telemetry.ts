@@ -23,6 +23,8 @@ export interface RunMetrics {
   speedup_ratio: number;
   acceptance_rate: number;
   memory_bandwidth_gbps: number;
+  kv_cache_mb: number;
+  current_k_lookahead: number;
 }
 
 export interface RunRequest {

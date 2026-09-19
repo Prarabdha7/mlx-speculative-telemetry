@@ -103,7 +103,7 @@ export default function Home() {
         <div className="flex flex-col gap-4 min-w-0">
           <MetricsGauges metrics={metrics} />
           <TokenInspector tokens={tokens} />
-          <div className="h-64">
+          <div className="h-80">
             <ExecutionDiff tokens={tokens} />
           </div>
         </div>

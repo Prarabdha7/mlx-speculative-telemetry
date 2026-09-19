@@ -30,7 +30,7 @@ export default function MetricsGauges({ metrics }: { metrics: RunMetrics | null 
     : undefined;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <Gauge label="Speedup" value={metrics ? `${metrics.speedup_ratio.toFixed(2)}x` : "—"} accent="#3b82f6" />
       <Gauge
         label="Acceptance Rate"
@@ -43,6 +43,12 @@ export default function MetricsGauges({ metrics }: { metrics: RunMetrics | null 
       <Gauge
         label="Memory Bandwidth"
         value={metrics ? `${metrics.memory_bandwidth_gbps.toFixed(1)} GB/s` : "—"}
+      />
+      <Gauge label="KV Cache Size" value={metrics ? `${metrics.kv_cache_mb.toFixed(1)} MB` : "—"} />
+      <Gauge
+        label="Adaptive Lookahead (K)"
+        value={metrics ? String(metrics.current_k_lookahead) : "—"}
+        accent="#eab308"
       />
     </div>
   );
