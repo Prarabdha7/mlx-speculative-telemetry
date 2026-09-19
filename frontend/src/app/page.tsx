@@ -14,7 +14,6 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function Home() {
   const [models, setModels] = useState<ModelPair | null>(null);
-  const [prompts, setPrompts] = useState<string[]>([]);
   const [tokens, setTokens] = useState<TokenTelemetry[]>([]);
   const [metrics, setMetrics] = useState<RunMetrics | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
@@ -33,10 +32,6 @@ export default function Home() {
       .then((r) => r.json())
       .then(setModels)
       .catch(() => setModels(null));
-    fetch(`${API_BASE}/api/prompts`)
-      .then((r) => r.json())
-      .then(setPrompts)
-      .catch(() => setPrompts([]));
     refreshBenchmarks();
   }, [refreshBenchmarks]);
 
@@ -103,7 +98,7 @@ export default function Home() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
-        <ControlsSandbox prompts={prompts} isRunning={runId !== null} onStart={handleStart} onStop={handleStop} />
+        <ControlsSandbox isRunning={runId !== null} onStart={handleStart} onStop={handleStop} />
 
         <div className="flex flex-col gap-4 min-w-0">
           <MetricsGauges metrics={metrics} />
