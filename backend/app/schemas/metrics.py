@@ -28,6 +28,8 @@ class RunMetrics(BaseModel):
     speedup_ratio: float = Field(ge=0.0)
     acceptance_rate: float = Field(ge=0.0, le=1.0)
     memory_bandwidth_gbps: float = Field(ge=0.0)
+    kv_cache_mb: float = Field(ge=0.0)
+    current_k_lookahead: int = Field(ge=1)
 
 
 class RunRequest(BaseModel):

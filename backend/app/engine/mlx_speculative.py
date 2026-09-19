@@ -2,6 +2,7 @@ import asyncio
 import random
 import threading
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Generator
 
 import mlx.core as mx
@@ -9,7 +10,7 @@ from mlx.utils import tree_flatten
 from mlx_lm import load
 from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
 
-from app.engine.telemetry import TelemetryTracker
+from app.engine.telemetry import KvCacheArchParams, TelemetryTracker
 from app.schemas.metrics import RunMetrics, TokenTelemetry
 
 PREFILL_STEP_SIZE = 512
@@ -17,6 +18,17 @@ GREEDY_TEMPERATURE_THRESHOLD = 1e-4
 # Floor added before taking log() of a residual/target distribution so that
 # zero-probability vocab entries don't produce -inf logits for mx.random.categorical.
 RESIDUAL_EPSILON = 1e-12
+# Fallback KV-cache dtype width (float16, MLX's default compute/activation
+# dtype) used only when a cache has no allocated buffer yet to introspect.
+DEFAULT_KV_PRECISION_BYTES = 2
+
+# Adaptive lookahead: rolling window of the last N rounds' acceptance rates,
+# and the acceptance-rate thresholds that raise/lower the active K.
+ADAPTIVE_K_WINDOW = 5
+ADAPTIVE_K_RAISE_THRESHOLD = 0.85
+ADAPTIVE_K_LOWER_THRESHOLD = 0.40
+ADAPTIVE_K_MIN = 1
+ADAPTIVE_K_MAX = 8
 
 _SENTINEL = object()
 
@@ -51,6 +63,9 @@ class SpeculativeEngine:
         self._eos_ids: set[int] = set()
         self._draft_weight_bytes = 0
         self._target_weight_bytes = 0
+        self._target_num_layers = 0
+        self._target_num_kv_heads = 0
+        self._target_head_dim = 0
         self._load_lock = threading.Lock()
 
     def _ensure_loaded(self) -> None:
@@ -71,6 +86,13 @@ class SpeculativeEngine:
             self._eos_ids = set(self._tokenizer.eos_token_ids)
             self._draft_weight_bytes = _weight_nbytes(self._draft)
             self._target_weight_bytes = _weight_nbytes(self._target)
+
+            target_args = self._target.args
+            self._target_num_layers = target_args.num_hidden_layers
+            self._target_num_kv_heads = target_args.num_key_value_heads or target_args.num_attention_heads
+            self._target_head_dim = target_args.head_dim or (
+                target_args.hidden_size // target_args.num_attention_heads
+            )
 
     async def generate_stream(
         self,
@@ -98,7 +120,6 @@ class SpeculativeEngine:
         temperature: float,
         run_id: str | None = None,
     ) -> Generator[TokenTelemetry | RunMetrics, None, None]:
-        tracker = TelemetryTracker(self._draft_weight_bytes, self._target_weight_bytes, run_id)
         is_greedy = temperature <= GREEDY_TEMPERATURE_THRESHOLD
 
         prompt_ids = mx.array(self._tokenizer.encode(prompt), mx.uint32)
@@ -108,9 +129,34 @@ class SpeculativeEngine:
         draft_y = _prefill(self._draft, draft_cache, prompt_ids)
         y = _prefill(self._target, target_cache, prompt_ids)
 
+        # The cache's own buffer dtype reflects MLX's real runtime activation
+        # precision (independent of the model's quantized weight bits), so
+        # read it directly rather than assuming a fixed width; an empty cache
+        # (single-token prompt, no prefill step run) falls back to fp16.
+        first_cache_layer = target_cache[0] if target_cache else None
+        kv_precision_bytes = (
+            first_cache_layer.keys.dtype.size
+            if first_cache_layer is not None and first_cache_layer.keys is not None
+            else DEFAULT_KV_PRECISION_BYTES
+        )
+        kv_cache_arch = KvCacheArchParams(
+            num_layers=self._target_num_layers,
+            num_kv_heads=self._target_num_kv_heads,
+            head_dim=self._target_head_dim,
+            precision_bytes=kv_precision_bytes,
+        )
+        tracker = TelemetryTracker(self._draft_weight_bytes, self._target_weight_bytes, kv_cache_arch, run_id)
+
+        # Adaptive tuning operates within [ADAPTIVE_K_MIN, ADAPTIVE_K_MAX]
+        # regardless of the requested starting k_lookahead, so a request above
+        # the ceiling doesn't get silently snapped down the first time the
+        # raise condition fires.
+        current_k = max(min(k_lookahead, ADAPTIVE_K_MAX), ADAPTIVE_K_MIN)
+        recent_acceptance_rates: deque[float] = deque(maxlen=ADAPTIVE_K_WINDOW)
+
         position = 0
         while position < max_tokens:
-            num_draft = min(k_lookahead, max_tokens - position)
+            num_draft = min(current_k, max_tokens - position)
 
             draft_ids: list[int] = []
             draft_probs: list[mx.array] = []
@@ -236,6 +282,18 @@ class SpeculativeEngine:
             trim_prompt_cache(target_cache, num_draft - accepted)
             trim_prompt_cache(draft_cache, max(num_draft - accepted - 1, 0))
 
+            # Self-tuning lookahead: a rolling average (not a single round's
+            # rate) over the last few rounds absorbs per-round noise before
+            # nudging K, so one lucky/unlucky round doesn't whipsaw it.
+            recent_acceptance_rates.append(accepted / num_draft)
+            rolling_acceptance_rate = sum(recent_acceptance_rates) / len(recent_acceptance_rates)
+            if rolling_acceptance_rate > ADAPTIVE_K_RAISE_THRESHOLD:
+                current_k = min(current_k + 1, ADAPTIVE_K_MAX)
+            elif rolling_acceptance_rate < ADAPTIVE_K_LOWER_THRESHOLD:
+                current_k = max(current_k - 1, ADAPTIVE_K_MIN)
+
+            yield tracker.snapshot(sequence_length=position, current_k_lookahead=current_k, is_final=False)
+
             if reached_limit or commit_id in self._eos_ids:
                 break
 
@@ -247,4 +305,4 @@ class SpeculativeEngine:
                 # draft cache up with it before producing a new token.
                 draft_y = mx.concatenate([mx.array([draft_ids[-1]], mx.uint32), draft_y])
 
-        yield tracker.snapshot(is_final=True)
+        yield tracker.snapshot(sequence_length=position, current_k_lookahead=current_k, is_final=True)

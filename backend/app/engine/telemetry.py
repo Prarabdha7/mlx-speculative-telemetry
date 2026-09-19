@@ -1,7 +1,40 @@
 import time
 import uuid
+from dataclasses import dataclass
 
 from app.schemas.metrics import RunMetrics, TokenStatus
+
+
+@dataclass(frozen=True)
+class KvCacheArchParams:
+    """Target-model architecture constants needed to size its KV cache.
+
+    `num_kv_heads` is deliberately the model's key/value head count, not its
+    total attention-head count: grouped-query-attention architectures like
+    Llama 3 project far fewer KV heads than query heads (Llama-3.1-8B: 8 vs
+    32), and sizing off the query-head count would overstate the real cache
+    footprint by that same factor.
+    """
+
+    num_layers: int
+    num_kv_heads: int
+    head_dim: int
+    precision_bytes: int
+
+
+def kv_cache_size_bytes(arch: KvCacheArchParams, sequence_length: int, batch_size: int = 1) -> int:
+    """Theoretical KV-cache footprint across every transformer layer:
+    2 (key + value) * layers * batch * seq_len * kv_heads * head_dim * dtype_size.
+    """
+    return (
+        2
+        * batch_size
+        * sequence_length
+        * arch.num_kv_heads
+        * arch.head_dim
+        * arch.precision_bytes
+        * arch.num_layers
+    )
 
 
 class TelemetryTracker:
@@ -12,11 +45,13 @@ class TelemetryTracker:
         self,
         draft_weight_bytes: int,
         target_weight_bytes: int,
+        kv_cache_arch: KvCacheArchParams,
         run_id: str | None = None,
     ) -> None:
         self.run_id = run_id or uuid.uuid4().hex[:12]
         self.draft_weight_bytes = draft_weight_bytes
         self.target_weight_bytes = target_weight_bytes
+        self.kv_cache_arch = kv_cache_arch
 
         self._start = time.perf_counter()
         self._status_counts: dict[TokenStatus, int] = {
@@ -51,7 +86,7 @@ class TelemetryTracker:
             + self._status_counts["bonus"]
         )
 
-    def snapshot(self, is_final: bool = False) -> RunMetrics:
+    def snapshot(self, sequence_length: int, current_k_lookahead: int, is_final: bool = False) -> RunMetrics:
         elapsed_s = max(time.perf_counter() - self._start, 1e-9)
         committed = self.committed_tokens
 
@@ -74,6 +109,7 @@ class TelemetryTracker:
             + self._target_forward_calls * self.target_weight_bytes
         )
         memory_bandwidth_gbps = bandwidth_bytes / elapsed_s / 1e9
+        kv_cache_mb = kv_cache_size_bytes(self.kv_cache_arch, sequence_length) / 1e6
 
         return RunMetrics(
             run_id=self.run_id,
@@ -86,4 +122,6 @@ class TelemetryTracker:
             speedup_ratio=speedup_ratio,
             acceptance_rate=acceptance_rate,
             memory_bandwidth_gbps=memory_bandwidth_gbps,
+            kv_cache_mb=kv_cache_mb,
+            current_k_lookahead=current_k_lookahead,
         )
