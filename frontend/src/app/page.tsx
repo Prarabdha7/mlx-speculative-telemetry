@@ -98,7 +98,7 @@ export default function Home() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
-        <ControlsSandbox isRunning={runId !== null} onStart={handleStart} onStop={handleStop} />
+        <ControlsSandbox isRunning={runId !== null} metrics={metrics} onStart={handleStart} onStop={handleStop} />
 
         <div className="flex flex-col gap-4 min-w-0">
           <MetricsGauges metrics={metrics} />

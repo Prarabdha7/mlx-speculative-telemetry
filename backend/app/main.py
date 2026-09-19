@@ -6,9 +6,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.models import BenchmarkRun, init_db, list_benchmark_runs
-from app.engine.mlx_speculative import SpeculativeEngine, calculate_dynamic_parameters
+from app.engine.mlx_speculative import SpeculativeEngine
 from app.engine.runs import QUEUE_DONE, RunRegistry
-from app.schemas.metrics import ClassifyRequest, ClassifyResponse, ModelPair, RunRequest, TokenTelemetry
+from app.schemas.metrics import ModelPair, RunRequest, TokenTelemetry
 
 load_dotenv()
 
@@ -61,11 +61,6 @@ def list_prompts() -> list[str]:
 @app.get("/api/benchmarks")
 def list_benchmarks() -> list[BenchmarkRun]:
     return list_benchmark_runs()
-
-
-@app.post("/api/classify")
-def classify_prompt(request: ClassifyRequest) -> ClassifyResponse:
-    return ClassifyResponse(**calculate_dynamic_parameters(request.prompt))
 
 
 @app.post("/api/runs")

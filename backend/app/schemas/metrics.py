@@ -31,27 +31,15 @@ class RunMetrics(BaseModel):
     kv_cache_mb: float = Field(ge=0.0)
     current_k_lookahead: int = Field(ge=1)
     actual_temperature: float = Field(ge=0.0, le=1.0)
+    top_p: float = Field(ge=0.0, le=1.0)
+    system_role: str
+    ended_naturally: bool
 
 
 class RunRequest(BaseModel):
     prompt: str
-    k_lookahead: int = Field(default=4, ge=1, le=16)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=128, ge=1, le=2048)
-    auto_tune: bool = True
 
 
 class ModelPair(BaseModel):
     draft_model: str
     target_model: str
-
-
-class ClassifyRequest(BaseModel):
-    prompt: str
-
-
-class ClassifyResponse(BaseModel):
-    temperature: float = Field(ge=0.0, le=1.0)
-    lookahead_k: int = Field(ge=1)
-    max_tokens: int = Field(ge=1)
-    detected_intent: str
