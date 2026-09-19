@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -37,6 +38,34 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful, accurate, and concise AI assistant."
 # model whose eos_token_id config predates <|im_end|> being added), so this
 # widens coverage defensively rather than trusting a single config field.
 NAMED_STOP_TOKENS = ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "</s>"]
+
+# Auto-tuning parameter engine: a lightweight, keyword-based intent
+# classifier that picks a sensible (temperature, k_lookahead) pair per
+# prompt category instead of relying on the client's slider defaults.
+MAX_ALLOWED_TEMPERATURE = 1.0
+_CODE_MATH_PATTERNS = [
+    re.compile(r"def\s"),
+    re.compile(r"```"),
+    *(re.compile(rf"\b{kw}\b") for kw in ["function", "import", "class", "calculate", "solve", "code", "sql"]),
+]
+_FACTUAL_PATTERNS = [
+    re.compile(rf"\b{kw}\b") for kw in ["what is", "who is", "explain", "summarize", "history", "definition"]
+]
+
+
+def classify_prompt_intent(prompt: str) -> tuple[float, int]:
+    """Classifies a prompt into a (temperature, k_lookahead) pair by intent.
+
+    Word-boundary matching avoids the obvious false positives a plain
+    substring check would hit here (e.g. "import" inside "important",
+    "class" inside "classic" or "classify").
+    """
+    lowered = prompt.lower()
+    if any(pattern.search(lowered) for pattern in _CODE_MATH_PATTERNS):
+        return 0.0, 5
+    if any(pattern.search(lowered) for pattern in _FACTUAL_PATTERNS):
+        return 0.2, 4
+    return 0.7, 3
 
 _SENTINEL = object()
 
@@ -136,11 +165,12 @@ class SpeculativeEngine:
         max_tokens: int = 128,
         temperature: float = 0.0,
         run_id: str | None = None,
+        auto_tune: bool = True,
     ) -> AsyncIterator[TokenTelemetry | RunMetrics]:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._ensure_loaded)
 
-        sync_gen = self._generate_sync(prompt, k_lookahead, max_tokens, temperature, run_id)
+        sync_gen = self._generate_sync(prompt, k_lookahead, max_tokens, temperature, run_id, auto_tune)
         while True:
             item = await loop.run_in_executor(None, next, sync_gen, _SENTINEL)
             if item is _SENTINEL:
@@ -154,7 +184,15 @@ class SpeculativeEngine:
         max_tokens: int,
         temperature: float,
         run_id: str | None = None,
+        auto_tune: bool = True,
     ) -> Generator[TokenTelemetry | RunMetrics, None, None]:
+        # Guardrail: applies regardless of auto_tune, so a manually-supplied
+        # temperature outside the model's sane sampling range never reaches
+        # generation even if a client bypasses the frontend slider's own cap.
+        temperature = max(0.0, min(temperature, MAX_ALLOWED_TEMPERATURE))
+        if auto_tune:
+            temperature, k_lookahead = classify_prompt_intent(prompt)
+
         is_greedy = temperature <= GREEDY_TEMPERATURE_THRESHOLD
 
         formatted_prompt = _format_prompt(self._tokenizer, prompt)
@@ -181,7 +219,9 @@ class SpeculativeEngine:
             head_dim=self._target_head_dim,
             precision_bytes=kv_precision_bytes,
         )
-        tracker = TelemetryTracker(self._draft_weight_bytes, self._target_weight_bytes, kv_cache_arch, run_id)
+        tracker = TelemetryTracker(
+            self._draft_weight_bytes, self._target_weight_bytes, kv_cache_arch, temperature, run_id
+        )
 
         # Adaptive tuning operates within [ADAPTIVE_K_MIN, ADAPTIVE_K_MAX]
         # regardless of the requested starting k_lookahead, so a request above

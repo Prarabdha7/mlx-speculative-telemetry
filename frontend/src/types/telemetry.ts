@@ -25,6 +25,7 @@ export interface RunMetrics {
   memory_bandwidth_gbps: number;
   kv_cache_mb: number;
   current_k_lookahead: number;
+  actual_temperature: number;
 }
 
 export interface RunRequest {
@@ -32,6 +33,7 @@ export interface RunRequest {
   k_lookahead: number;
   temperature: number;
   max_tokens: number;
+  auto_tune: boolean;
 }
 
 export interface ModelPair {

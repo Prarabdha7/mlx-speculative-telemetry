@@ -46,12 +46,14 @@ class TelemetryTracker:
         draft_weight_bytes: int,
         target_weight_bytes: int,
         kv_cache_arch: KvCacheArchParams,
+        actual_temperature: float,
         run_id: str | None = None,
     ) -> None:
         self.run_id = run_id or uuid.uuid4().hex[:12]
         self.draft_weight_bytes = draft_weight_bytes
         self.target_weight_bytes = target_weight_bytes
         self.kv_cache_arch = kv_cache_arch
+        self.actual_temperature = actual_temperature
 
         self._start = time.perf_counter()
         self._status_counts: dict[TokenStatus, int] = {
@@ -124,4 +126,5 @@ class TelemetryTracker:
             memory_bandwidth_gbps=memory_bandwidth_gbps,
             kv_cache_mb=kv_cache_mb,
             current_k_lookahead=current_k_lookahead,
+            actual_temperature=self.actual_temperature,
         )
