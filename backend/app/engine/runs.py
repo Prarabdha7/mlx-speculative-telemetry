@@ -53,18 +53,23 @@ class RunRegistry:
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 run_id=run_id,
+                auto_tune=request.auto_tune,
             ):
                 if isinstance(event, RunMetrics) and event.is_final:
                     # Persisted before the event reaches the WebSocket client so a
                     # client that reacts to `is_final` by immediately refetching
                     # /api/benchmarks is guaranteed to see this run's row.
+                    # Uses the metrics event's actual k/temperature rather than
+                    # the request's, since auto_tune (and adaptive-K) can both
+                    # override what was actually used for generation — history
+                    # would otherwise show stale, misleading request values.
                     benchmark = BenchmarkRun(
                         id=run_id,
                         timestamp=time.time(),
                         draft_model=self._engine.draft_model_path,
                         target_model=self._engine.target_model_path,
-                        k_lookahead=request.k_lookahead,
-                        temperature=request.temperature,
+                        k_lookahead=event.current_k_lookahead,
+                        temperature=event.actual_temperature,
                         prompt=request.prompt,
                         total_tokens=event.total_tokens,
                         acceptance_rate=event.acceptance_rate,
