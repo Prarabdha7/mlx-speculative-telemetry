@@ -51,31 +51,3 @@ export function downloadCsv(filename: string, csv: string): void {
   URL.revokeObjectURL(url);
 }
 
-export interface PromptIntent {
-  label: string;
-  temperature: number;
-  k: number;
-}
-
-// Mirrors backend/app/engine/mlx_speculative.py's classify_prompt_intent —
-// this is only a live preview shown before Start Run; the server classifies
-// authoritatively and is the source of truth for what a run actually used.
-const CODE_MATH_PATTERNS = [
-  /def\s/,
-  /```/,
-  ...["function", "import", "class", "calculate", "solve", "code", "sql"].map((kw) => new RegExp(`\\b${kw}\\b`)),
-];
-const FACTUAL_PATTERNS = ["what is", "who is", "explain", "summarize", "history", "definition"].map(
-  (kw) => new RegExp(`\\b${kw}\\b`),
-);
-
-export function classifyPromptIntent(prompt: string): PromptIntent {
-  const lowered = prompt.toLowerCase();
-  if (CODE_MATH_PATTERNS.some((re) => re.test(lowered))) {
-    return { label: "Code Mode", temperature: 0.0, k: 5 };
-  }
-  if (FACTUAL_PATTERNS.some((re) => re.test(lowered))) {
-    return { label: "Factual Mode", temperature: 0.2, k: 4 };
-  }
-  return { label: "Creative Mode", temperature: 0.7, k: 3 };
-}

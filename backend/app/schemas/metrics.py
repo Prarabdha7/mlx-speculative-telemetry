@@ -44,3 +44,14 @@ class RunRequest(BaseModel):
 class ModelPair(BaseModel):
     draft_model: str
     target_model: str
+
+
+class ClassifyRequest(BaseModel):
+    prompt: str
+
+
+class ClassifyResponse(BaseModel):
+    temperature: float = Field(ge=0.0, le=1.0)
+    lookahead_k: int = Field(ge=1)
+    max_tokens: int = Field(ge=1)
+    detected_intent: str

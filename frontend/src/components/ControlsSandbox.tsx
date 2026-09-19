@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { RunRequest } from "@/types/telemetry";
-import { classifyPromptIntent, cn } from "@/lib/utils";
+import { useEffect, useRef, useState } from "react";
+import type { AutoTuneParams, RunRequest } from "@/types/telemetry";
+import { cn } from "@/lib/utils";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const CLASSIFY_DEBOUNCE_MS = 350;
 
 interface ControlsSandboxProps {
   isRunning: boolean;
@@ -77,42 +80,85 @@ function PromptEditor({
   );
 }
 
-function AutoTuneToggle({ enabled, onChange, disabled }: { enabled: boolean; onChange: (v: boolean) => void; disabled: boolean }) {
+function ToggleSwitch({
+  enabled,
+  onChange,
+  disabled,
+}: {
+  enabled: boolean;
+  onChange: (v: boolean) => void;
+  disabled: boolean;
+}) {
   return (
-    <div className="flex items-center justify-between">
-      <label className="text-xs text-zinc-500 font-sans">Auto-Optimize Parameters</label>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={enabled}
-        disabled={disabled}
-        onClick={() => onChange(!enabled)}
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      disabled={disabled}
+      onClick={() => onChange(!enabled)}
+      className={cn(
+        "relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:opacity-50",
+        enabled ? "bg-accepted" : "bg-zinc-300 dark:bg-zinc-700",
+      )}
+    >
+      <span
         className={cn(
-          "relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:opacity-50",
-          enabled ? "bg-accepted" : "bg-zinc-300 dark:bg-zinc-700",
+          "absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform",
+          enabled && "translate-x-4",
         )}
-      >
-        <span
-          className={cn(
-            "absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform",
-            enabled && "translate-x-4",
-          )}
-        />
-      </button>
+      />
+    </button>
+  );
+}
+
+function AutonomousCard({ params, loading }: { params: AutoTuneParams | null; loading: boolean }) {
+  return (
+    <div className="border border-border rounded-md bg-zinc-100 dark:bg-black/40 p-3 flex flex-col gap-1.5">
+      <div className="text-xs text-zinc-500 font-sans uppercase tracking-wide">
+        {loading ? "Analyzing…" : "Detected Intent"}
+      </div>
+      <div className="text-sm font-mono text-zinc-800 dark:text-zinc-200">{params?.detected_intent ?? "—"}</div>
+      <div className="flex gap-4 text-xs font-mono text-zinc-600 dark:text-zinc-400">
+        <span>Temp: {params ? params.temperature.toFixed(2) : "—"}</span>
+        <span>K: {params?.lookahead_k ?? "—"}</span>
+        <span>Max: {params?.max_tokens ?? "—"}</span>
+      </div>
     </div>
   );
 }
 
 export default function ControlsSandbox({ isRunning, onStart, onStop }: ControlsSandboxProps) {
   const [prompt, setPrompt] = useState(PROMPT_PRESETS[0].prompt);
-  const [autoTune, setAutoTune] = useState(true);
+  const [manualOverride, setManualOverride] = useState(false);
+  const [autoParams, setAutoParams] = useState<AutoTuneParams | null>(null);
+  const [autoParamsLoading, setAutoParamsLoading] = useState(false);
   const [kLookahead, setKLookahead] = useState(4);
   const [temperature, setTemperature] = useState(0);
   const [maxTokens, setMaxTokens] = useState(128);
 
-  const detected = useMemo(() => classifyPromptIntent(prompt), [prompt]);
-  const effectiveK = autoTune ? detected.k : kLookahead;
-  const effectiveTemperature = autoTune ? detected.temperature : temperature;
+  useEffect(() => {
+    if (!prompt.trim()) {
+      setAutoParams(null);
+      return;
+    }
+    setAutoParamsLoading(true);
+    const timer = setTimeout(() => {
+      fetch(`${API_BASE}/api/classify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      })
+        .then((r) => r.json())
+        .then((data: AutoTuneParams) => setAutoParams(data))
+        .catch(() => setAutoParams(null))
+        .finally(() => setAutoParamsLoading(false));
+    }, CLASSIFY_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [prompt]);
+
+  const effectiveK = manualOverride ? kLookahead : autoParams?.lookahead_k ?? 3;
+  const effectiveTemperature = manualOverride ? temperature : autoParams?.temperature ?? 0.7;
+  const effectiveMaxTokens = manualOverride ? maxTokens : autoParams?.max_tokens ?? 256;
 
   return (
     <div className="border border-border rounded-md bg-surface p-4 flex flex-col gap-5">
@@ -120,41 +166,47 @@ export default function ControlsSandbox({ isRunning, onStart, onStop }: Controls
 
       <PromptEditor prompt={prompt} onChange={setPrompt} disabled={isRunning} />
 
-      <AutoTuneToggle enabled={autoTune} onChange={setAutoTune} disabled={isRunning} />
-      {autoTune && (
-        <div className="-mt-3 text-xs font-mono text-warning">
-          Auto: {detected.label} [T={detected.temperature.toFixed(1)}, K={detected.k}]
+      <div className="flex flex-col gap-2">
+        <div className="text-xs text-zinc-500 font-sans uppercase tracking-wide">Autonomous Neural Controller</div>
+        {!manualOverride && <AutonomousCard params={autoParams} loading={autoParamsLoading} />}
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-zinc-500 font-sans">Advanced Manual Override</label>
+          <ToggleSwitch enabled={manualOverride} onChange={setManualOverride} disabled={isRunning} />
         </div>
-      )}
+      </div>
 
-      <Slider
-        label="Lookahead (k)"
-        value={effectiveK}
-        min={1}
-        max={16}
-        step={1}
-        disabled={isRunning || autoTune}
-        onChange={setKLookahead}
-      />
-      <Slider
-        label="Temperature"
-        value={effectiveTemperature}
-        min={0}
-        max={1}
-        step={0.1}
-        decimals={1}
-        disabled={isRunning || autoTune}
-        onChange={setTemperature}
-      />
-      <Slider
-        label="Max Tokens"
-        value={maxTokens}
-        min={16}
-        max={512}
-        step={16}
-        disabled={isRunning}
-        onChange={setMaxTokens}
-      />
+      {manualOverride && (
+        <>
+          <Slider
+            label="Lookahead (k)"
+            value={kLookahead}
+            min={1}
+            max={16}
+            step={1}
+            disabled={isRunning}
+            onChange={setKLookahead}
+          />
+          <Slider
+            label="Temperature"
+            value={temperature}
+            min={0}
+            max={1}
+            step={0.1}
+            decimals={1}
+            disabled={isRunning}
+            onChange={setTemperature}
+          />
+          <Slider
+            label="Max Tokens"
+            value={maxTokens}
+            min={16}
+            max={512}
+            step={16}
+            disabled={isRunning}
+            onChange={setMaxTokens}
+          />
+        </>
+      )}
 
       {isRunning ? (
         <button
@@ -170,8 +222,8 @@ export default function ControlsSandbox({ isRunning, onStart, onStop }: Controls
               prompt,
               k_lookahead: effectiveK,
               temperature: effectiveTemperature,
-              max_tokens: maxTokens,
-              auto_tune: autoTune,
+              max_tokens: effectiveMaxTokens,
+              auto_tune: !manualOverride,
             })
           }
           disabled={!prompt.trim()}
