@@ -37,6 +37,28 @@ def _weight_nbytes(model) -> int:
     return sum(p.nbytes for _, p in tree_flatten(model.parameters()))
 
 
+def _format_prompt(tokenizer, prompt: str) -> str:
+    """Wraps a raw user prompt for an instruction-tuned model instead of
+    handing it to the tokenizer as raw completion text — without this, the
+    model continues the prompt as prose (e.g. narrating tutorial steps for a
+    "write a function" request) rather than treating it as an instruction to
+    follow. Uses the tokenizer's own chat template when the model ships one
+    (every configured Llama-3.x Instruct model does), falling back to a
+    manual instruction wrapper only for a tokenizer with no template at all.
+    """
+    if getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    return (
+        "You are a coding assistant. Output ONLY the raw Python code requested. "
+        "Do not output steps, markdown, or explanations.\n\n"
+        f"User: {prompt}\nAssistant:"
+    )
+
+
 def _prefill(model, cache, tokens: mx.array, step_size: int = PREFILL_STEP_SIZE) -> mx.array:
     """Feeds all but the last token of `tokens` through `model`, leaving the
     final token unconsumed so the caller's next forward call produces its
@@ -122,7 +144,8 @@ class SpeculativeEngine:
     ) -> Generator[TokenTelemetry | RunMetrics, None, None]:
         is_greedy = temperature <= GREEDY_TEMPERATURE_THRESHOLD
 
-        prompt_ids = mx.array(self._tokenizer.encode(prompt), mx.uint32)
+        formatted_prompt = _format_prompt(self._tokenizer, prompt)
+        prompt_ids = mx.array(self._tokenizer.encode(formatted_prompt), mx.uint32)
         draft_cache = make_prompt_cache(self._draft)
         target_cache = make_prompt_cache(self._target)
 
