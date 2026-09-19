@@ -47,6 +47,8 @@ class TelemetryTracker:
         target_weight_bytes: int,
         kv_cache_arch: KvCacheArchParams,
         actual_temperature: float,
+        top_p: float,
+        system_role: str,
         run_id: str | None = None,
     ) -> None:
         self.run_id = run_id or uuid.uuid4().hex[:12]
@@ -54,6 +56,8 @@ class TelemetryTracker:
         self.target_weight_bytes = target_weight_bytes
         self.kv_cache_arch = kv_cache_arch
         self.actual_temperature = actual_temperature
+        self.top_p = top_p
+        self.system_role = system_role
 
         self._start = time.perf_counter()
         self._status_counts: dict[TokenStatus, int] = {
@@ -88,7 +92,13 @@ class TelemetryTracker:
             + self._status_counts["bonus"]
         )
 
-    def snapshot(self, sequence_length: int, current_k_lookahead: int, is_final: bool = False) -> RunMetrics:
+    def snapshot(
+        self,
+        sequence_length: int,
+        current_k_lookahead: int,
+        ended_naturally: bool = False,
+        is_final: bool = False,
+    ) -> RunMetrics:
         elapsed_s = max(time.perf_counter() - self._start, 1e-9)
         committed = self.committed_tokens
 
@@ -127,4 +137,7 @@ class TelemetryTracker:
             kv_cache_mb=kv_cache_mb,
             current_k_lookahead=current_k_lookahead,
             actual_temperature=self.actual_temperature,
+            top_p=self.top_p,
+            system_role=self.system_role,
+            ended_naturally=ended_naturally,
         )

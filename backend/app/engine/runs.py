@@ -49,20 +49,16 @@ class RunRegistry:
         try:
             async for event in self._engine.generate_stream(
                 prompt=request.prompt,
-                k_lookahead=request.k_lookahead,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
                 run_id=run_id,
-                auto_tune=request.auto_tune,
             ):
                 if isinstance(event, RunMetrics) and event.is_final:
                     # Persisted before the event reaches the WebSocket client so a
                     # client that reacts to `is_final` by immediately refetching
                     # /api/benchmarks is guaranteed to see this run's row.
                     # Uses the metrics event's actual k/temperature rather than
-                    # the request's, since auto_tune (and adaptive-K) can both
-                    # override what was actually used for generation — history
-                    # would otherwise show stale, misleading request values.
+                    # a request-supplied value — there is no such value any
+                    # more, since the neural meta-planner derives everything
+                    # from the prompt alone.
                     benchmark = BenchmarkRun(
                         id=run_id,
                         timestamp=time.time(),

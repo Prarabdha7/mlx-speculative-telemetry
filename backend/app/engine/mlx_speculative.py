@@ -1,4 +1,5 @@
 import asyncio
+import json
 import random
 import re
 import threading
@@ -31,7 +32,6 @@ ADAPTIVE_K_LOWER_THRESHOLD = 0.40
 ADAPTIVE_K_MIN = 1
 ADAPTIVE_K_MAX = 8
 
-DEFAULT_SYSTEM_PROMPT = "You are a helpful, accurate, and concise AI assistant."
 # Named stop tokens across common chat-model families, unioned with the
 # tokenizer's own configured eos ids: a model's tokenizer_config.json doesn't
 # always list every terminator its template can emit (e.g. a Qwen-family
@@ -39,104 +39,146 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful, accurate, and concise AI assistant."
 # widens coverage defensively rather than trusting a single config field.
 NAMED_STOP_TOKENS = ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "</s>"]
 
-# Autonomous parameter engine: a feature-scoring heuristic (not a fixed
-# keyword-to-bucket lookup) that derives continuous generation parameters
-# from a prompt's estimated determinism vs. creativity, rather than sorting
-# every prompt into one of three hardcoded parameter tuples.
-MAX_ALLOWED_TEMPERATURE = 1.0
-_TEMPERATURE_FLOOR = 0.1  # non-code deterministic prompts asymptote here, never all the way to 0.0
-_TEMPERATURE_CEILING = 0.8
+# Generation is bounded only by natural EOS/EOT termination now — this is a
+# safety net against a pathological run that never produces a stop token,
+# not a per-category budget.
+SAFETY_MAX_TOKENS_CEILING = 8192
 
-# Deliberately excludes bare "(" / ")" from the syntax class: parenthetical
-# asides are common in ordinary prose ("(briefly)") and would otherwise
-# false-trigger code mode; "{" / "}" / ";" / "+" are rare enough outside
-# code and math to be reliable signals on their own.
-_CODE_SYNTAX_PATTERN = re.compile(r"def\s|```|[{};]|\+|\bimport\b|\bclass\b|\bfunction\b|\bsql\b")
-_DETERMINISM_WORDS = re.compile(r"\ball\b|\bdetails?\b|\blist\b|\bexact\b|\bprecise\b|\bcalculate\b|\bsolve\b")
-_FACTUAL_WORDS = re.compile(r"\bwhat is\b|\bwho is\b|\bwhen\b|\bhistory\b|\bdefinition\b|\bexplain\b|\bsummarize\b")
-_CREATIVITY_WORDS = re.compile(
-    r"\bwrite\b|\bstory\b|\bimagine\b|\bcreative\b|\bpoem\b|\bfiction\b|\bbrainstorm\b|\binvent\b|\bdream\b|\bdesign\b"
+# Neural meta-planner: instead of a keyword/regex heuristic, the 1B draft
+# model classifies its own prompt and self-selects a generation profile.
+#
+# A 1B instruct model asked cold to "classify, don't answer" reliably just
+# answers the user's request instead (verified directly: asking it to
+# classify a coding prompt produced a working Fibonacci function, not JSON,
+# even with a very forceful system prompt). Two things fixed this, both
+# verified empirically before shipping: (1) few-shot examples spanning code,
+# math, factual, and creative prompts — a bare instruction wasn't enough,
+# concrete examples of the exact behavior wanted were; (2) forcing the
+# completion to start mid-JSON (`{"temperature":`) rather than hoping the
+# model opens the object itself — a well-known guided-generation technique
+# that turned "usually forgets the opening brace" into reliable, parseable
+# output across every category tested.
+PLANNER_MAX_NEW_TOKENS = 100
+PLANNER_SYSTEM_PROMPT = (
+    "You are a JSON classifier for a text-generation router. You output ONLY a JSON object, "
+    "never code, stories, or direct answers to the request."
 )
-_STRONG_LENGTH_SIGNALS = re.compile(r"\blist all\b|\ball the\b|\bcomprehensive\b|\bin depth\b|\bevery\b")
-_MODERATE_LENGTH_SIGNALS = re.compile(r"\bexplain\b|\bdetails?\b|\bsummarize\b|\bdescribe\b|\bhistory of\b")
+PLANNER_FEW_SHOT_EXAMPLES = [
+    (
+        "Classify: Write a Python function that returns the nth Fibonacci number using memoization.",
+        '{"temperature": 0.0, "top_p": 0.9, "initial_k": 5, "system_role": "You are a concise software engineer."}',
+    ),
+    (
+        "Classify: Solve for x: 2x + 5 = 15",
+        '{"temperature": 0.0, "top_p": 0.9, "initial_k": 5, "system_role": "You are a precise mathematician."}',
+    ),
+    (
+        "Classify: What year did the Berlin Wall fall?",
+        '{"temperature": 0.1, "top_p": 0.9, "initial_k": 4, "system_role": "You are a precise, factual historian."}',
+    ),
+    (
+        "Classify: Write a short story about a lighthouse keeper.",
+        '{"temperature": 0.7, "top_p": 0.95, "initial_k": 3, "system_role": "You are a creative fiction writer."}',
+    ),
+]
+PLANNER_FORCED_PREFIX = '{"temperature":'
+PLANNER_FALLBACK_PROFILE = {
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "initial_k": 4,
+    "system_role": "You are a helpful AI assistant.",
+}
+_JSON_OBJECT_PATTERN = re.compile(r"\{.*?\}", re.DOTALL)
 
-# Length tiers. The floor is 512, not 0 — a prompt with no length signal at
-# all still gets real headroom, since even a "simple" question can run long
-# once the model starts elaborating; 256 was observed truncating ordinary
-# explanatory answers mid-sentence.
-SHORT_QUERY_MAX_TOKENS = 512
-EXPLANATORY_MAX_TOKENS = 1024
-LISTING_MAX_TOKENS = 2048
+
+def _run_completion(model, tokenizer, formatted_prompt: str, stop_token_ids: set[int], max_new_tokens: int) -> str:
+    """Runs a plain greedy completion (no speculative decoding, no
+    telemetry) — used for the planner's own cheap self-classification pass,
+    never for real user-facing generation."""
+    prompt_ids = mx.array(tokenizer.encode(formatted_prompt), mx.uint32)
+    cache = make_prompt_cache(model)
+    y = _prefill(model, cache, prompt_ids)
+
+    generated_ids: list[int] = []
+    for _ in range(max_new_tokens):
+        logits = model(y[None], cache=cache)[0, -1, :]
+        token_id = int(mx.argmax(logits).item())
+        if token_id in stop_token_ids:
+            break
+        generated_ids.append(token_id)
+        y = mx.array([token_id], mx.uint32)
+    return tokenizer.decode(generated_ids)
 
 
-def calculate_dynamic_parameters(prompt: str) -> dict:
-    """Scores a prompt's determinism vs. creativity and its expected output
-    length, deriving continuous generation parameters rather than sorting
-    it into one of a few fixed buckets.
+def plan_execution_profile(prompt: str, draft_model, tokenizer, stop_token_ids: set[int]) -> dict:
+    """Asks the small draft model to classify the prompt and self-select a
+    generation profile, in place of a fixed keyword/regex heuristic. Runs
+    entirely on the 1B draft model (never the target) since this is a cheap
+    routing decision, not real generation — a few hundred milliseconds of
+    extra latency per run, traded for genuinely prompt-derived parameters
+    instead of a hand-tuned scoring formula.
 
-    Determinism signals: code/math syntax, digit density, and exhaustive or
-    precision-demanding language ("all", "details", "exact"). Creativity
-    signals: open-ended, generative language ("write", "imagine", "story").
-    Pure code prompts are special-cased to temperature 0.0 (fully greedy) —
-    every other prompt's temperature asymptotes toward, but never reaches,
-    _TEMPERATURE_FLOOR as determinism dominates, and toward _TEMPERATURE_CEILING
-    as creativity dominates, on a continuous scale between the two.
+    Missing or invalid individual fields fall back one at a time (a 1B model
+    asked for four-key structured output won't always get all four right),
+    and the whole profile falls back to a fixed safe default only if the
+    model's output can't be parsed as JSON at all — this must never crash a run.
     """
-    lowered = prompt.lower()
+    messages: list[dict[str, str]] = [{"role": "system", "content": PLANNER_SYSTEM_PROMPT}]
+    for example_prompt, example_response in PLANNER_FEW_SHOT_EXAMPLES:
+        messages.append({"role": "user", "content": example_prompt})
+        messages.append({"role": "assistant", "content": example_response})
+    messages.append({"role": "user", "content": f"Classify: {prompt}"})
 
-    is_code = bool(_CODE_SYNTAX_PATTERN.search(lowered))
-    numeral_hits = len(re.findall(r"\d", lowered))
-    determinism_word_hits = len(_DETERMINISM_WORDS.findall(lowered))
-    factual_word_hits = len(_FACTUAL_WORDS.findall(lowered))
-    creativity_word_hits = len(_CREATIVITY_WORDS.findall(lowered))
+    try:
+        planner_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        planner_prompt += PLANNER_FORCED_PREFIX
+        raw_output = _run_completion(draft_model, tokenizer, planner_prompt, stop_token_ids, PLANNER_MAX_NEW_TOKENS)
 
-    determinism_score = numeral_hits + determinism_word_hits * 2 + factual_word_hits * 2
-    creativity_score = creativity_word_hits * 3
+        match = _JSON_OBJECT_PATTERN.search(PLANNER_FORCED_PREFIX + raw_output)
+        if not match:
+            return dict(PLANNER_FALLBACK_PROFILE)
+        parsed = json.loads(match.group(0))
+    except Exception:
+        return dict(PLANNER_FALLBACK_PROFILE)
 
-    strong_length = bool(_STRONG_LENGTH_SIGNALS.search(lowered))
-    moderate_length = bool(_MODERATE_LENGTH_SIGNALS.search(lowered))
-    # Code/Math always gets at least the Explanatory tier's headroom — a
-    # requested function or derivation is itself a form of detailed output,
-    # regardless of whether the prompt also contains an "explain"/"details"
-    # word — with the same escalation to the Listing tier on a strong signal.
-    if strong_length:
-        max_tokens = LISTING_MAX_TOKENS
-    elif moderate_length or is_code:
-        max_tokens = EXPLANATORY_MAX_TOKENS
-    else:
-        max_tokens = SHORT_QUERY_MAX_TOKENS
+    fallback = PLANNER_FALLBACK_PROFILE
 
-    if is_code:
-        return {
-            "temperature": 0.0,
-            "lookahead_k": 5,
-            "max_tokens": max_tokens,
-            "detected_intent": "Deterministic Code / Math Generation",
-        }
+    def _numeric_field(key: str, lo: float, hi: float, cast: type) -> float | int:
+        try:
+            return max(lo, min(cast(parsed[key]), hi))
+        except (KeyError, TypeError, ValueError):
+            return fallback[key]
 
-    total_signal = determinism_score + creativity_score
-    # net in [-1, 1]: -1 = purely deterministic, +1 = purely creative, 0 = no signal either way.
-    net = 0.0 if total_signal == 0 else (creativity_score - determinism_score) / total_signal
-    temperature = round(max(_TEMPERATURE_FLOOR, min(_TEMPERATURE_CEILING, 0.45 + net * 0.35)), 2)
-
-    if determinism_score >= creativity_score:
-        lookahead_k = 4
-        if strong_length:
-            detected_intent = "Strict Factual / Historical Listing"
-        elif factual_word_hits > 0:
-            detected_intent = "Explanatory Factual Response"
-        else:
-            detected_intent = "Deterministic / Analytical Query"
-    else:
-        lookahead_k = 3
-        detected_intent = "Open-Ended Creative Generation" if net > 0.6 else "General Conversational Response"
+    system_role = str(parsed.get("system_role") or "").strip() or fallback["system_role"]
 
     return {
-        "temperature": temperature,
-        "lookahead_k": lookahead_k,
-        "max_tokens": max_tokens,
-        "detected_intent": detected_intent,
+        "temperature": _numeric_field("temperature", 0.0, 0.8, float),
+        "top_p": _numeric_field("top_p", 0.85, 1.0, float),
+        "initial_k": int(_numeric_field("initial_k", 2, 6, int)),
+        "system_role": system_role,
     }
+
+
+def _sample_with_top_p(logits: mx.array, top_p: float) -> mx.array:
+    """Nucleus-samples a token id from `logits`. Only the smallest prefix of
+    tokens (in descending probability order) whose cumulative probability
+    reaches `top_p` is eligible; everything else is masked to -inf before
+    sampling, which keeps `mx.random.categorical`'s implicit softmax
+    correctly renormalized over just that nucleus.
+    """
+    if top_p >= 1.0:
+        return mx.random.categorical(logits)
+    sorted_indices = mx.argsort(-logits)
+    sorted_logits = logits[sorted_indices]
+    cumulative_probs = mx.cumsum(mx.softmax(sorted_logits, axis=-1), axis=-1)
+    # Shifted by one so the token that CROSSES the top_p threshold is kept
+    # (otherwise the nucleus could end up empty when the top token alone
+    # already exceeds top_p).
+    keep_mask = mx.concatenate([mx.array([True]), cumulative_probs[:-1] <= top_p])
+    masked_sorted_logits = mx.where(keep_mask, sorted_logits, mx.array(float("-inf")))
+    unsorted_logits = masked_sorted_logits[mx.argsort(sorted_indices)]
+    return mx.random.categorical(unsorted_logits)
+
 
 _SENTINEL = object()
 
@@ -145,27 +187,27 @@ def _weight_nbytes(model) -> int:
     return sum(p.nbytes for _, p in tree_flatten(model.parameters()))
 
 
-def _format_prompt(tokenizer, prompt: str) -> str:
+def _format_prompt(tokenizer, prompt: str, system_role: str) -> str:
     """Wraps a raw user prompt for an instruction-tuned model instead of
     handing it to the tokenizer as raw completion text — without this, the
     model continues the prompt as prose (e.g. narrating tutorial steps for a
     "write a function" request, or drifting into unrelated content on an
     open-ended question) rather than treating it as an instruction to follow.
-    A general system prompt keeps this consistent across every prompt type
-    (coding, knowledge, reasoning), not just one category. Uses the
-    tokenizer's own chat template when the model ships one (every configured
-    Llama-3.x Instruct model does); falls back to a manual instruction
-    wrapper only for a tokenizer whose template application fails or is
-    absent entirely.
+    `system_role` is the meta-planner's own per-prompt system instruction
+    rather than one fixed string, so a math question and a creative-writing
+    request get differently-tailored framing. Uses the tokenizer's own chat
+    template when the model ships one (every configured Llama-3.x Instruct
+    model does); falls back to a manual instruction wrapper only for a
+    tokenizer whose template application fails or is absent entirely.
     """
     messages = [
-        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+        {"role": "system", "content": system_role},
         {"role": "user", "content": prompt},
     ]
     try:
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     except Exception:
-        return f"System: {DEFAULT_SYSTEM_PROMPT}\n\nUser: {prompt}\n\nAssistant:"
+        return f"System: {system_role}\n\nUser: {prompt}\n\nAssistant:"
 
 
 def _prefill(model, cache, tokens: mx.array, step_size: int = PREFILL_STEP_SIZE) -> mx.array:
@@ -232,16 +274,12 @@ class SpeculativeEngine:
     async def generate_stream(
         self,
         prompt: str,
-        k_lookahead: int = 4,
-        max_tokens: int = 128,
-        temperature: float = 0.0,
         run_id: str | None = None,
-        auto_tune: bool = True,
     ) -> AsyncIterator[TokenTelemetry | RunMetrics]:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._ensure_loaded)
 
-        sync_gen = self._generate_sync(prompt, k_lookahead, max_tokens, temperature, run_id, auto_tune)
+        sync_gen = self._generate_sync(prompt, run_id)
         while True:
             item = await loop.run_in_executor(None, next, sync_gen, _SENTINEL)
             if item is _SENTINEL:
@@ -251,25 +289,22 @@ class SpeculativeEngine:
     def _generate_sync(
         self,
         prompt: str,
-        k_lookahead: int,
-        max_tokens: int,
-        temperature: float,
         run_id: str | None = None,
-        auto_tune: bool = True,
     ) -> Generator[TokenTelemetry | RunMetrics, None, None]:
-        # Guardrail: applies regardless of auto_tune, so a manually-supplied
-        # temperature outside the model's sane sampling range never reaches
-        # generation even if a client bypasses the frontend slider's own cap.
-        temperature = max(0.0, min(temperature, MAX_ALLOWED_TEMPERATURE))
-        if auto_tune:
-            params = calculate_dynamic_parameters(prompt)
-            temperature = params["temperature"]
-            k_lookahead = params["lookahead_k"]
-            max_tokens = params["max_tokens"]
+        # Every generation criterion (temperature, top_p, starting lookahead,
+        # system persona) is inferred from the prompt itself by the 1B draft
+        # model — there is no manual/heuristic parameter path left to fall
+        # back to.
+        profile = plan_execution_profile(prompt, self._draft, self._tokenizer, self._stop_token_ids)
+        temperature = profile["temperature"]
+        top_p = profile["top_p"]
+        k_lookahead = profile["initial_k"]
+        system_role = profile["system_role"]
+        max_tokens = SAFETY_MAX_TOKENS_CEILING
 
         is_greedy = temperature <= GREEDY_TEMPERATURE_THRESHOLD
 
-        formatted_prompt = _format_prompt(self._tokenizer, prompt)
+        formatted_prompt = _format_prompt(self._tokenizer, prompt, system_role)
         prompt_ids = mx.array(self._tokenizer.encode(formatted_prompt), mx.uint32)
         draft_cache = make_prompt_cache(self._draft)
         target_cache = make_prompt_cache(self._target)
@@ -294,13 +329,19 @@ class SpeculativeEngine:
             precision_bytes=kv_precision_bytes,
         )
         tracker = TelemetryTracker(
-            self._draft_weight_bytes, self._target_weight_bytes, kv_cache_arch, temperature, run_id
+            self._draft_weight_bytes,
+            self._target_weight_bytes,
+            kv_cache_arch,
+            temperature,
+            top_p,
+            system_role,
+            run_id,
         )
 
-        # Adaptive tuning operates within [ADAPTIVE_K_MIN, ADAPTIVE_K_MAX]
-        # regardless of the requested starting k_lookahead, so a request above
-        # the ceiling doesn't get silently snapped down the first time the
-        # raise condition fires.
+        # Adaptive tuning operates within [ADAPTIVE_K_MIN, ADAPTIVE_K_MAX];
+        # the planner's own initial_k is already clamped to [2, 6] (a subset
+        # of this range), so this is a defensive invariant rather than a
+        # live constraint on typical planner output.
         current_k = max(min(k_lookahead, ADAPTIVE_K_MAX), ADAPTIVE_K_MIN)
         recent_acceptance_rates: deque[float] = deque(maxlen=ADAPTIVE_K_WINDOW)
 
@@ -316,7 +357,12 @@ class SpeculativeEngine:
                 logits = self._draft(dy[None], cache=draft_cache)[0, -1, :]
                 scaled = logits if is_greedy else logits / temperature
                 probs = mx.softmax(scaled, axis=-1)
-                token = mx.argmax(scaled, axis=-1) if is_greedy else mx.random.categorical(scaled)
+                # top_p only ever narrows which token gets PROPOSED here; the
+                # accept/reject probabilities below are always computed from
+                # the full, untruncated `probs`/`target_probs` distributions,
+                # so nucleus sampling can't perturb the speculative-sampling
+                # math itself (it only changes what draft_ids[i] ends up being).
+                token = mx.argmax(scaled, axis=-1) if is_greedy else _sample_with_top_p(scaled, top_p)
                 mx.eval(token, probs)
                 tracker.record_draft_step(time.perf_counter() - step_start)
 
@@ -402,7 +448,7 @@ class SpeculativeEngine:
                     # draft model under-weighted relative to the target,
                     # renormalized by the implicit softmax inside categorical().
                     residual = mx.maximum(target_probs[i] - draft_probs[i], 0.0)
-                    commit_id = int(mx.random.categorical(mx.log(residual + RESIDUAL_EPSILON)).item())
+                    commit_id = int(_sample_with_top_p(mx.log(residual + RESIDUAL_EPSILON), top_p).item())
                 commit_status = "correction"
                 commit_draft_p = draft_p
                 commit_target_p = float(target_probs[i, commit_id].item())
@@ -416,7 +462,7 @@ class SpeculativeEngine:
                 commit_id = (
                     int(mx.argmax(bonus_logits).item())
                     if is_greedy
-                    else int(mx.random.categorical(bonus_logits / temperature).item())
+                    else int(_sample_with_top_p(bonus_logits / temperature, top_p).item())
                 )
                 commit_status = "bonus"
                 commit_target_p = float(target_probs[num_draft, commit_id].item())
@@ -455,7 +501,9 @@ class SpeculativeEngine:
             elif rolling_acceptance_rate < ADAPTIVE_K_LOWER_THRESHOLD:
                 current_k = max(current_k - 1, ADAPTIVE_K_MIN)
 
-            yield tracker.snapshot(sequence_length=position, current_k_lookahead=current_k, is_final=False)
+            yield tracker.snapshot(
+                sequence_length=position, current_k_lookahead=current_k, ended_naturally=False, is_final=False
+            )
 
             if reached_limit or hit_stop:
                 break
@@ -468,4 +516,10 @@ class SpeculativeEngine:
                 # draft cache up with it before producing a new token.
                 draft_y = mx.concatenate([mx.array([draft_ids[-1]], mx.uint32), draft_y])
 
-        yield tracker.snapshot(sequence_length=position, current_k_lookahead=current_k, is_final=True)
+        # "Natural" means the run ended because the model itself produced a
+        # stop token, not because the 8192-token safety ceiling was hit —
+        # the ceiling exists only as a backstop against a run that never
+        # terminates on its own.
+        yield tracker.snapshot(
+            sequence_length=position, current_k_lookahead=current_k, ended_naturally=hit_stop, is_final=True
+        )

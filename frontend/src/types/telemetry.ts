@@ -26,26 +26,18 @@ export interface RunMetrics {
   kv_cache_mb: number;
   current_k_lookahead: number;
   actual_temperature: number;
+  top_p: number;
+  system_role: string;
+  ended_naturally: boolean;
 }
 
 export interface RunRequest {
   prompt: string;
-  k_lookahead: number;
-  temperature: number;
-  max_tokens: number;
-  auto_tune: boolean;
 }
 
 export interface ModelPair {
   draft_model: string;
   target_model: string;
-}
-
-export interface AutoTuneParams {
-  temperature: number;
-  lookahead_k: number;
-  max_tokens: number;
-  detected_intent: string;
 }
 
 export type TelemetryEvent =
