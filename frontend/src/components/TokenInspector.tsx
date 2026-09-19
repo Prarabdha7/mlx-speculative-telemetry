@@ -48,11 +48,11 @@ function TokenModal({ token, onClose }: { token: TokenTelemetry; onClose: () => 
           <span className="text-base" style={{ color: STATUS_COLOR[token.status] }}>
             &quot;{token.token}&quot;
           </span>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 font-sans">
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 font-sans">
             close
           </button>
         </div>
-        <dl className="space-y-1.5 text-zinc-400">
+        <dl className="space-y-1.5 text-zinc-600 dark:text-zinc-400">
           <Row label="status" value={STATUS_LABEL[token.status]} />
           <Row label="position" value={String(token.position)} />
           <Row label="token_id" value={String(token.token_id)} />
@@ -70,8 +70,8 @@ function TokenModal({ token, onClose }: { token: TokenTelemetry; onClose: () => 
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between gap-4">
-      <dt className="text-zinc-600">{label}</dt>
-      <dd className="text-zinc-200">{value}</dd>
+      <dt className="text-zinc-500 dark:text-zinc-600">{label}</dt>
+      <dd className="text-zinc-800 dark:text-zinc-200">{value}</dd>
     </div>
   );
 }

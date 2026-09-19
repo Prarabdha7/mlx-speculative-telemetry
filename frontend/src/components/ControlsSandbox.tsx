@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { RunRequest } from "@/types/telemetry";
 
 interface ControlsSandboxProps {
@@ -25,17 +25,17 @@ export default function ControlsSandbox({ prompts, isRunning, onStart, onStop }:
   const activePrompt = useCustom ? customPrompt : prompt;
 
   return (
-    <div className="border border-border rounded-md bg-surface p-4 flex flex-col gap-4">
+    <div className="border border-border rounded-md bg-surface p-4 flex flex-col gap-5">
       <div className="text-xs text-zinc-500 font-sans uppercase tracking-wide">Run Controls</div>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs text-zinc-500 font-sans">Prompt</label>
+        <label className="text-xs text-zinc-500 font-sans h-4 leading-4">Prompt</label>
         {!useCustom ? (
           <select
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             disabled={isRunning}
-            className="bg-black/40 border border-border rounded-sm px-2 py-1.5 text-sm font-mono text-zinc-200 disabled:opacity-50"
+            className="bg-zinc-100 dark:bg-black/40 border border-border rounded-sm px-2 py-1.5 text-sm font-mono text-zinc-800 dark:text-zinc-200 disabled:opacity-50"
           >
             {prompts.map((p) => (
               <option key={p} value={p}>
@@ -49,14 +49,14 @@ export default function ControlsSandbox({ prompts, isRunning, onStart, onStop }:
             onChange={(e) => setCustomPrompt(e.target.value)}
             disabled={isRunning}
             rows={3}
-            className="bg-black/40 border border-border rounded-sm px-2 py-1.5 text-sm font-mono text-zinc-200 disabled:opacity-50 resize-none"
+            className="bg-zinc-100 dark:bg-black/40 border border-border rounded-sm px-2 py-1.5 text-sm font-mono text-zinc-800 dark:text-zinc-200 disabled:opacity-50 resize-none"
             placeholder="Enter a custom prompt…"
           />
         )}
         <button
           onClick={() => setUseCustom((v) => !v)}
           disabled={isRunning}
-          className="self-start text-xs text-zinc-500 hover:text-zinc-300 font-sans disabled:opacity-50"
+          className="self-start text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 font-sans disabled:opacity-50"
         >
           {useCustom ? "use preset prompts" : "use custom prompt"}
         </button>
@@ -77,6 +77,7 @@ export default function ControlsSandbox({ prompts, isRunning, onStart, onStop }:
         min={0}
         max={2}
         step={0.1}
+        decimals={1}
         disabled={isRunning}
         onChange={setTemperature}
       />
@@ -118,6 +119,7 @@ function Slider({
   min,
   max,
   step,
+  decimals = 0,
   disabled,
   onChange,
 }: {
@@ -126,23 +128,43 @@ function Slider({
   min: number;
   max: number;
   step: number;
+  decimals?: number;
   disabled: boolean;
   onChange: (v: number) => void;
 }) {
+  const [display, setDisplay] = useState(value);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => setDisplay(value), [value]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const handleInput = (v: number) => {
+    setDisplay(v);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => onChange(v), 60);
+  };
+
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex justify-between text-xs text-zinc-500 font-sans">
-        <span>{label}</span>
-        <span className="font-mono text-zinc-300">{value}</span>
+      <div className="flex items-center justify-between h-4">
+        <span className="text-xs text-zinc-500 font-sans leading-4">{label}</span>
+        <span className="min-w-[3rem] text-center text-xs font-mono text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-black/40 border border-border rounded-sm px-1.5 py-0.5 leading-4">
+          {display.toFixed(decimals)}
+        </span>
       </div>
       <input
         type="range"
         min={min}
         max={max}
         step={step}
-        value={value}
+        value={display}
         disabled={disabled}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e) => handleInput(Number(e.target.value))}
         className="accent-[#3b82f6] disabled:opacity-50"
       />
     </div>

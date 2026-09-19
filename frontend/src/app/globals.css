@@ -5,10 +5,18 @@
 :root {
   --font-inter: Inter, sans-serif;
   --font-geist-mono: "JetBrains Mono", monospace;
+
+  --surface: 248 250 252;
+  --border: 226 232 240;
+}
+
+.dark {
+  --surface: 9 9 11;
+  --border: 39 39 42;
 }
 
 body {
-  background-color: #09090b;
+  background-color: rgb(var(--surface));
 }
 
 ::-webkit-scrollbar {
@@ -17,10 +25,10 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #09090b;
+  background: rgb(var(--surface));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: rgb(var(--border));
   border-radius: 4px;
 }

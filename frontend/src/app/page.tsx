@@ -6,6 +6,7 @@ import MetricsGauges from "@/components/MetricsGauges";
 import TokenInspector from "@/components/TokenInspector";
 import ExecutionDiff from "@/components/ExecutionDiff";
 import BenchmarkTable from "@/components/BenchmarkTable";
+import ThemeToggle from "@/components/ThemeToggle";
 import { TelemetryClient } from "@/lib/websocket";
 import type { BenchmarkRun, ModelPair, RunMetrics, RunRequest, TokenTelemetry } from "@/types/telemetry";
 
@@ -82,19 +83,22 @@ export default function Home() {
     <main className="min-h-screen p-4 md:p-6 flex flex-col gap-4 max-w-[1600px] mx-auto">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-sm font-mono text-zinc-200">mlx-speculative-telemetry</h1>
+          <h1 className="text-sm font-mono text-zinc-800 dark:text-zinc-200">mlx-speculative-telemetry</h1>
           {models && (
             <p className="text-xs text-zinc-500 font-mono mt-0.5">
               {models.draft_model} → {models.target_model}
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2 text-xs font-mono text-zinc-500">
-          <span
-            className="w-2 h-2 rounded-full"
-            style={{ backgroundColor: runId ? "#22c55e" : "#3f3f46" }}
-          />
-          {runId ? "streaming" : "idle"}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-xs font-mono text-zinc-500">
+            <span
+              className="w-2 h-2 rounded-full"
+              style={{ backgroundColor: runId ? "#22c55e" : "#3f3f46" }}
+            />
+            {runId ? "streaming" : "idle"}
+          </div>
+          <ThemeToggle />
         </div>
       </header>
 

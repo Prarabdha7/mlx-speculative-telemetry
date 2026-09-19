@@ -4,10 +4,18 @@ import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tan
 import type { BenchmarkRun } from "@/types/telemetry";
 import { downloadCsv, formatDuration, formatPercent, formatTimestamp, formatTps, toCsv } from "@/lib/utils";
 
+function ModelCell({ value }: { value: string }) {
+  return (
+    <span className="block max-w-[12rem] truncate" title={value}>
+      {value}
+    </span>
+  );
+}
+
 const columns: ColumnDef<BenchmarkRun>[] = [
   { header: "Timestamp", accessorKey: "timestamp", cell: (c) => formatTimestamp(c.getValue<number>()) },
-  { header: "Draft Model", accessorKey: "draft_model" },
-  { header: "Target Model", accessorKey: "target_model" },
+  { header: "Draft Model", accessorKey: "draft_model", cell: (c) => <ModelCell value={c.getValue<string>()} /> },
+  { header: "Target Model", accessorKey: "target_model", cell: (c) => <ModelCell value={c.getValue<string>()} /> },
   { header: "k", accessorKey: "k_lookahead" },
   { header: "Temp", accessorKey: "temperature" },
   { header: "Tokens", accessorKey: "total_tokens" },
@@ -31,18 +39,18 @@ export default function BenchmarkTable({ runs }: { runs: BenchmarkRun[] }) {
         <button
           onClick={() => downloadCsv(`benchmarks-${Date.now()}.csv`, toCsv(runs))}
           disabled={runs.length === 0}
-          className="text-xs text-zinc-500 hover:text-zinc-200 font-sans disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 font-sans disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Export CSV
         </button>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-auto max-h-[420px]">
         <table className="w-full text-sm font-mono">
-          <thead>
+          <thead className="sticky top-0 z-10 bg-surface">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="border-b border-border">
                 {hg.headers.map((header) => (
-                  <th key={header.id} className="text-left px-3 py-2 text-zinc-500 font-sans font-normal text-xs whitespace-nowrap">
+                  <th key={header.id} className="text-left px-3 py-2 text-zinc-500 font-sans font-normal text-xs whitespace-nowrap bg-surface">
                     {flexRender(header.column.columnDef.header, header.getContext())}
                   </th>
                 ))}
@@ -51,9 +59,9 @@ export default function BenchmarkTable({ runs }: { runs: BenchmarkRun[] }) {
           </thead>
           <tbody>
             {table.getRowModel().rows.map((row) => (
-              <tr key={row.id} className="border-b border-border last:border-0 hover:bg-white/5">
+              <tr key={row.id} className="border-b border-border last:border-0 hover:bg-black/[0.03] dark:hover:bg-white/5">
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-3 py-2 text-zinc-300 whitespace-nowrap">
+                  <td key={cell.id} className="px-3 py-2 text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
