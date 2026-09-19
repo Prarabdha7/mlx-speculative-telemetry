@@ -43,6 +43,11 @@ engine = SpeculativeEngine(draft_model=DRAFT_MODEL, target_model=TARGET_MODEL)
 runs = RunRegistry(engine)
 
 
+@app.get("/")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/api/models")
 def list_models() -> ModelPair:
     return ModelPair(draft_model=DRAFT_MODEL, target_model=TARGET_MODEL)
