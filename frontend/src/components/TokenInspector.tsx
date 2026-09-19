@@ -11,6 +11,13 @@ const STATUS_LABEL: Record<TokenTelemetry["status"], string> = {
   bonus: "Bonus",
 };
 
+const FINAL_DECISION: Record<TokenTelemetry["status"], string> = {
+  accepted: "Accepted",
+  rejected: "Rejected",
+  correction: "Resampled",
+  bonus: "Accepted (bonus)",
+};
+
 function TokenChip({ token, onSelect }: { token: TokenTelemetry; onSelect: (t: TokenTelemetry) => void }) {
   const color = STATUS_COLOR[token.status];
   return (
@@ -38,6 +45,8 @@ function TokenModal({ token, onClose }: { token: TokenTelemetry; onClose: () => 
           ? "Resampled from the target model's residual distribution after the preceding draft token was rejected."
           : "Free token emitted by the target model after the full draft window was accepted.";
 
+  const isGreedy = token.status !== "correction" && token.status !== "bonus" && token.accept_probability === null;
+
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
       <div
@@ -52,15 +61,35 @@ function TokenModal({ token, onClose }: { token: TokenTelemetry; onClose: () => 
             close
           </button>
         </div>
+
         <dl className="space-y-1.5 text-zinc-600 dark:text-zinc-400">
-          <Row label="status" value={STATUS_LABEL[token.status]} />
           <Row label="position" value={String(token.position)} />
           <Row label="token_id" value={String(token.token_id)} />
-          <Row label="draft_probability" value={formatProb(token.draft_probability)} />
-          <Row label="target_probability" value={formatProb(token.target_probability)} />
-          <Row label="accept_probability" value={formatProb(token.accept_probability)} />
           <Row label="latency_ms" value={token.latency_ms.toFixed(2)} />
         </dl>
+
+        <div className="mt-3 pt-3 border-t border-border space-y-1.5">
+          <Row label="Draft Probability Q(x)" value={formatProb(token.draft_probability)} />
+          <Row label="Target Probability P(x)" value={formatProb(token.target_probability)} />
+          <div className="flex flex-col gap-1 pt-1">
+            <span className="text-zinc-500 dark:text-zinc-600 text-xs">
+              Acceptance Condition: min(1, P(x)/Q(x))
+            </span>
+            <span className="text-zinc-800 dark:text-zinc-200 text-right">
+              {isGreedy ? "argmax match (greedy)" : formatProb(token.accept_probability)}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+          <span className="text-xs text-zinc-500 dark:text-zinc-600 font-sans uppercase tracking-wide">
+            Final Decision
+          </span>
+          <span className="font-mono text-sm" style={{ color: STATUS_COLOR[token.status] }}>
+            {FINAL_DECISION[token.status]}
+          </span>
+        </div>
+
         <p className="mt-3 text-zinc-500 font-sans text-xs leading-relaxed">{reasoning}</p>
       </div>
     </div>
