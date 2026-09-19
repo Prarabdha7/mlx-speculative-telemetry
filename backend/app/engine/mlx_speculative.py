@@ -60,6 +60,14 @@ _CREATIVITY_WORDS = re.compile(
 _STRONG_LENGTH_SIGNALS = re.compile(r"\blist all\b|\ball the\b|\bcomprehensive\b|\bin depth\b|\bevery\b")
 _MODERATE_LENGTH_SIGNALS = re.compile(r"\bexplain\b|\bdetails?\b|\bsummarize\b|\bdescribe\b|\bhistory of\b")
 
+# Length tiers. The floor is 512, not 0 — a prompt with no length signal at
+# all still gets real headroom, since even a "simple" question can run long
+# once the model starts elaborating; 256 was observed truncating ordinary
+# explanatory answers mid-sentence.
+SHORT_QUERY_MAX_TOKENS = 512
+EXPLANATORY_MAX_TOKENS = 1024
+LISTING_MAX_TOKENS = 2048
+
 
 def calculate_dynamic_parameters(prompt: str) -> dict:
     """Scores a prompt's determinism vs. creativity and its expected output
@@ -87,7 +95,16 @@ def calculate_dynamic_parameters(prompt: str) -> dict:
 
     strong_length = bool(_STRONG_LENGTH_SIGNALS.search(lowered))
     moderate_length = bool(_MODERATE_LENGTH_SIGNALS.search(lowered))
-    max_tokens = 2048 if strong_length else 1024 if moderate_length else 256
+    # Code/Math always gets at least the Explanatory tier's headroom — a
+    # requested function or derivation is itself a form of detailed output,
+    # regardless of whether the prompt also contains an "explain"/"details"
+    # word — with the same escalation to the Listing tier on a strong signal.
+    if strong_length:
+        max_tokens = LISTING_MAX_TOKENS
+    elif moderate_length or is_code:
+        max_tokens = EXPLANATORY_MAX_TOKENS
+    else:
+        max_tokens = SHORT_QUERY_MAX_TOKENS
 
     if is_code:
         return {
