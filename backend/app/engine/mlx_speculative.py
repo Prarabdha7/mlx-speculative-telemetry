@@ -30,6 +30,14 @@ ADAPTIVE_K_LOWER_THRESHOLD = 0.40
 ADAPTIVE_K_MIN = 1
 ADAPTIVE_K_MAX = 8
 
+DEFAULT_SYSTEM_PROMPT = "You are a helpful, accurate, and concise AI assistant."
+# Named stop tokens across common chat-model families, unioned with the
+# tokenizer's own configured eos ids: a model's tokenizer_config.json doesn't
+# always list every terminator its template can emit (e.g. a Qwen-family
+# model whose eos_token_id config predates <|im_end|> being added), so this
+# widens coverage defensively rather than trusting a single config field.
+NAMED_STOP_TOKENS = ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "</s>"]
+
 _SENTINEL = object()
 
 
@@ -41,22 +49,23 @@ def _format_prompt(tokenizer, prompt: str) -> str:
     """Wraps a raw user prompt for an instruction-tuned model instead of
     handing it to the tokenizer as raw completion text — without this, the
     model continues the prompt as prose (e.g. narrating tutorial steps for a
-    "write a function" request) rather than treating it as an instruction to
-    follow. Uses the tokenizer's own chat template when the model ships one
-    (every configured Llama-3.x Instruct model does), falling back to a
-    manual instruction wrapper only for a tokenizer with no template at all.
+    "write a function" request, or drifting into unrelated content on an
+    open-ended question) rather than treating it as an instruction to follow.
+    A general system prompt keeps this consistent across every prompt type
+    (coding, knowledge, reasoning), not just one category. Uses the
+    tokenizer's own chat template when the model ships one (every configured
+    Llama-3.x Instruct model does); falls back to a manual instruction
+    wrapper only for a tokenizer whose template application fails or is
+    absent entirely.
     """
-    if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    return (
-        "You are a coding assistant. Output ONLY the raw Python code requested. "
-        "Do not output steps, markdown, or explanations.\n\n"
-        f"User: {prompt}\nAssistant:"
-    )
+    messages = [
+        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    except Exception:
+        return f"System: {DEFAULT_SYSTEM_PROMPT}\n\nUser: {prompt}\n\nAssistant:"
 
 
 def _prefill(model, cache, tokens: mx.array, step_size: int = PREFILL_STEP_SIZE) -> mx.array:
@@ -82,7 +91,7 @@ class SpeculativeEngine:
         self._draft = None
         self._target = None
         self._tokenizer = None
-        self._eos_ids: set[int] = set()
+        self._stop_token_ids: set[int] = set()
         self._draft_weight_bytes = 0
         self._target_weight_bytes = 0
         self._target_num_layers = 0
@@ -105,7 +114,11 @@ class SpeculativeEngine:
                     f"(draft vocab={draft_tokenizer.vocab_size}, "
                     f"target vocab={self._tokenizer.vocab_size})."
                 )
-            self._eos_ids = set(self._tokenizer.eos_token_ids)
+            self._stop_token_ids = set(self._tokenizer.eos_token_ids)
+            vocab = self._tokenizer.get_vocab()
+            for token_str in NAMED_STOP_TOKENS:
+                if token_str in vocab:
+                    self._stop_token_ids.add(vocab[token_str])
             self._draft_weight_bytes = _weight_nbytes(self._draft)
             self._target_weight_bytes = _weight_nbytes(self._target)
 
@@ -214,6 +227,7 @@ class SpeculativeEngine:
             commit_draft_p = None
             commit_target_p = None
             reached_limit = False
+            hit_stop = False
 
             for i in range(num_draft):
                 draft_token_id = draft_ids[i]
@@ -228,6 +242,12 @@ class SpeculativeEngine:
                     is_accepted = random.random() < accept_probability
 
                 if is_accepted:
+                    if draft_token_id in self._stop_token_ids:
+                        # End the turn here without emitting the stop token
+                        # itself, so its control tag never reaches the
+                        # WebSocket stream or renders in the UI.
+                        hit_stop = True
+                        break
                     tracker.record_token("accepted")
                     yield TokenTelemetry(
                         token=self._tokenizer.decode([draft_token_id]),
@@ -274,7 +294,7 @@ class SpeculativeEngine:
                 commit_target_p = float(target_probs[i, commit_id].item())
                 break
 
-            if not reached_limit and commit_id is None and accepted == num_draft:
+            if not reached_limit and not hit_stop and commit_id is None and accepted == num_draft:
                 # Every drafted token was accepted: the target model's pass
                 # already scored one position past the last draft token, so
                 # that bonus token is free — no extra forward pass needed.
@@ -288,19 +308,25 @@ class SpeculativeEngine:
                 commit_target_p = float(target_probs[num_draft, commit_id].item())
 
             if commit_id is not None:
-                tracker.record_token(commit_status)
-                yield TokenTelemetry(
-                    token=self._tokenizer.decode([commit_id]),
-                    token_id=commit_id,
-                    status=commit_status,
-                    position=position,
-                    draft_probability=commit_draft_p,
-                    target_probability=commit_target_p,
-                    accept_probability=None,
-                    latency_ms=verify_latency_ms / num_draft,
-                    timestamp=time.time(),
-                )
-                position += 1
+                if commit_id in self._stop_token_ids:
+                    # Same sanitization as the accepted-draft-token case above:
+                    # a correction/bonus token that turns out to be a stop
+                    # token ends the turn without ever being yielded.
+                    hit_stop = True
+                else:
+                    tracker.record_token(commit_status)
+                    yield TokenTelemetry(
+                        token=self._tokenizer.decode([commit_id]),
+                        token_id=commit_id,
+                        status=commit_status,
+                        position=position,
+                        draft_probability=commit_draft_p,
+                        target_probability=commit_target_p,
+                        accept_probability=None,
+                        latency_ms=verify_latency_ms / num_draft,
+                        timestamp=time.time(),
+                    )
+                    position += 1
 
             trim_prompt_cache(target_cache, num_draft - accepted)
             trim_prompt_cache(draft_cache, max(num_draft - accepted - 1, 0))
@@ -317,7 +343,7 @@ class SpeculativeEngine:
 
             yield tracker.snapshot(sequence_length=position, current_k_lookahead=current_k, is_final=False)
 
-            if reached_limit or commit_id in self._eos_ids:
+            if reached_limit or hit_stop:
                 break
 
             y = mx.array([commit_id], mx.uint32)
